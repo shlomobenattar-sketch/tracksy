@@ -8,7 +8,7 @@ app.use(cors());
 app.use(express.json());
 
 /* ========================
-   BASIC ROUTES (חשוב ל-Render)
+   BASIC ROUTES (Render)
 ======================== */
 
 app.get('/', (req, res) => {
@@ -20,6 +20,26 @@ app.get('/api/health', (req, res) => {
 });
 
 /* ========================
+   DETECT STORE
+======================== */
+
+function detectStore(url) {
+  try {
+    const hostname = new URL(url).hostname.toLowerCase();
+
+    if (hostname.includes('amazon.')) return 'amazon';
+    if (hostname.includes('zara.com')) return 'zara';
+    if (hostname.includes('ksp.co.il')) return 'ksp';
+    if (hostname.includes('terminalx.com')) return 'terminalx';
+    if (hostname.includes('iherb.com')) return 'iherb';
+
+    return 'unknown';
+  } catch {
+    return 'invalid';
+  }
+}
+
+/* ========================
    MAIN DETECT ROUTE
 ======================== */
 
@@ -29,12 +49,14 @@ app.post('/detect', async (req, res) => {
 
   const fullUrl = url.startsWith('http') ? url : 'https://' + url;
 
+  const store = detectStore(fullUrl);
+
   try {
     const fetch = (await import('node-fetch')).default;
 
     const response = await fetch(fullUrl, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0',
         'Accept': 'text/html,application/xhtml+xml',
         'Accept-Language': 'en-US,en;q=0.9,he;q=0.8',
       },
@@ -81,33 +103,28 @@ app.post('/detect', async (req, res) => {
     let priceNum = null;
     let currency = 'ILS';
 
-    // JSON-LD
     const jld = [...html.matchAll(/"price"\s*:\s*["']?([\d.]+)["']?/gi)]
       .map(m => parseFloat(m[1]))
       .filter(p => p > 0.5 && p < 100000);
 
     if (jld.length) priceNum = Math.min(...jld);
 
-    // OpenGraph
     if (!priceNum) {
       const ogp = html.match(/property=["']product:price:amount["'][^>]+content=["']([\d.,]+)["']/i)
                || html.match(/content=["']([\d.,]+)["'][^>]+property=["']product:price:amount["']/i);
       if (ogp) priceNum = parseFloat(ogp[1].replace(/,/g,''));
     }
 
-    // itemprop
     if (!priceNum) {
       const ip = html.match(/itemprop=["']price["'][^>]*content=["']([\d.,]+)["']/i);
       if (ip) priceNum = parseFloat(ip[1].replace(/,/g,''));
     }
 
-    // data-price
     if (!priceNum) {
       const dp = html.match(/data-price=["']([\d.,]+)["']/i);
       if (dp) priceNum = parseFloat(dp[1].replace(/,/g,''));
     }
 
-    // currency symbol fallback
     if (!priceNum) {
       const cs = html.match(/[\$₪€£]\s*(\d{1,5}[.,]\d{2})/);
       if (cs) priceNum = parseFloat(cs[1].replace(/,/g,''));
@@ -135,16 +152,18 @@ app.post('/detect', async (req, res) => {
 
     res.json({
       name: name || null,
-      price: priceNum || null,          // חשוב! מספר
+      price: priceNum || null,
       currency,
       displayPrice: priceNum ? sym + priceNum.toFixed(2) : null,
+      store
     });
 
   } catch(e) {
     res.json({
       error: e.message,
       name: null,
-      price: null
+      price: null,
+      store
     });
   }
 });
