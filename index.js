@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const { chromium } = require('playwright');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -7,169 +8,133 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-/* ========================
+/* =========================
    TEMP STORAGE (MVP)
-======================== */
+========================= */
 let products = [];
 
-/* ========================
+/* =========================
    BASIC ROUTES
-======================== */
+========================= */
 
 app.get('/', (req, res) => {
   res.send('Tracksy API is running 🚀');
 });
 
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok' });
+app.get('/products', (req, res) => {
+  res.json(products);
 });
 
-/* ========================
-   DETECT STORE
-======================== */
+app.post('/products', (req, res) => {
+  const { url, name, price } = req.body;
 
-function detectStore(url) {
-  try {
-    const hostname = new URL(url).hostname.toLowerCase();
+  const product = {
+    id: Date.now(),
+    url,
+    name: name || 'Unknown product',
+    price: price || null,
+    createdAt: new Date()
+  };
 
-    if (hostname.includes('amazon.')) return 'amazon';
-    if (hostname.includes('zara.com')) return 'zara';
-    if (hostname.includes('ksp.co.il')) return 'ksp';
-    if (hostname.includes('terminalx.com')) return 'terminalx';
-    if (hostname.includes('iherb.com')) return 'iherb';
+  products.push(product);
 
-    return 'unknown';
-  } catch {
-    return 'invalid';
-  }
-}
+  res.json({
+    message: 'Product added',
+    product
+  });
+});
 
-/* ========================
-   DETECT ROUTE
-======================== */
+/* =========================
+   PLAYWRIGHT DETECT
+========================= */
 
 app.post('/detect', async (req, res) => {
-  const { url } = req.body;
-
-  if (!url) return res.json({ error: 'Missing url' });
-
-  const fullUrl = url.startsWith('http') ? url : 'https://' + url;
-  const store = detectStore(fullUrl);
-
-  try {
-    const fetch = (await import('node-fetch')).default;
-
-    const response = await fetch(fullUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-        'Accept': 'text/html',
-        'Accept-Language': 'en-US,en;q=0.9'
-      },
-      redirect: 'follow'
-    });
-
-    if (!response.ok) {
-      throw new Error('Fetch failed: ' + response.status);
-    }
-
-    const html = await response.text();
-
-    let name = '';
-    const titleMatch = html.match(/<title>(.*?)<\/title>/i);
-    if (titleMatch) name = titleMatch[1].trim();
-
-    res.json({
-      name,
-      price: null,
-      currency: null,
-      displayPrice: null,
-      store
-    });
-
-  } catch (e) {
-    res.json({
-      error: e.message,
-      store
-    });
-  }
-});
-
-/* ========================
-   ADD PRODUCT (AUTO)
-======================== */
-
-app.post('/products', async (req, res) => {
   const { url } = req.body;
 
   if (!url) {
     return res.json({ error: 'Missing url' });
   }
 
-  const fullUrl = url.startsWith('http') ? url : 'https://' + url;
-  const store = detectStore(fullUrl);
-
-  let name = 'Unknown product';
-  let price = null;
+  let browser;
 
   try {
-    const fetch = (await import('node-fetch')).default;
-
-    const response = await fetch(fullUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0',
-        'Accept': 'text/html'
-      }
+    browser = await chromium.launch({
+      args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      headless: true
     });
 
-    if (response.ok) {
-      const html = await response.text();
+    const page = await browser.newPage();
 
-      // extract name
-      const titleMatch = html.match(/<title>(.*?)<\/title>/i);
-      if (titleMatch) {
-        name = titleMatch[1].trim();
-      }
+    await page.goto(url, {
+      waitUntil: 'domcontentloaded',
+      timeout: 25000
+    });
 
-      // basic price detection
-      const priceMatch = html.match(/[\$₪€£]\s*(\d+[.,]?\d*)/);
-      if (priceMatch) {
-        price = parseFloat(priceMatch[1].replace(',', '.'));
-      }
+    // ===== NAME =====
+    let name = null;
+
+    try {
+      name = await page.locator('h1').first().textContent();
+    } catch {}
+
+    if (!name) {
+      try {
+        name = await page.title();
+      } catch {}
     }
 
-  } catch (e) {
-    console.log('Auto fetch failed:', e.message);
+    if (name) {
+      name = name.trim();
+    }
+
+    // ===== PRICE =====
+    let price = null;
+
+    const selectors = [
+      '[class*="price"]',
+      '[data-testid*="price"]',
+      '[class*="Price"]',
+      'span'
+    ];
+
+    for (const sel of selectors) {
+      try {
+        const text = await page.locator(sel).first().textContent();
+
+        if (text && text.match(/[0-9]/)) {
+          const clean = text.replace(/[^\d.]/g, '');
+          if (clean) {
+            price = Number(clean);
+            break;
+          }
+        }
+      } catch {}
+    }
+
+    await browser.close();
+
+    res.json({
+      name: name || null,
+      price: price || null
+    });
+
+  } catch (err) {
+    console.error(err);
+
+    if (browser) await browser.close();
+
+    res.json({
+      error: 'Playwright failed',
+      name: null,
+      price: null
+    });
   }
-
-  const newProduct = {
-    id: Date.now(),
-    url: fullUrl,
-    name,
-    price,
-    store,
-    createdAt: new Date()
-  };
-
-  products.push(newProduct);
-
-  res.json({
-    message: 'Product added automatically',
-    product: newProduct
-  });
 });
 
-/* ========================
-   GET PRODUCTS
-======================== */
-
-app.get('/products', (req, res) => {
-  res.json(products);
-});
-
-/* ========================
+/* =========================
    START SERVER
-======================== */
+========================= */
 
 app.listen(PORT, () => {
-  console.log('Server running on port', PORT);
+  console.log('Server running on port ' + PORT);
 });
