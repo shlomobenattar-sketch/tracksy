@@ -1,6 +1,5 @@
 const express = require('express');
 const cors = require('cors');
-const { chromium } = require('playwright');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -8,9 +7,6 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-/* =========================
-   TEMP STORAGE (MVP)
-========================= */
 let products = [];
 
 /* =========================
@@ -25,14 +21,127 @@ app.get('/products', (req, res) => {
   res.json(products);
 });
 
-app.post('/products', (req, res) => {
+/* =========================
+   DETECT STORE
+========================= */
+
+function detectStore(url) {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    if (host.includes('zara')) return 'zara';
+    if (host.includes('ksp')) return 'ksp';
+    if (host.includes('iherb')) return 'iherb';
+    if (host.includes('amazon')) return 'amazon';
+    return 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+/* =========================
+   FETCH HTML (NO BLOCK)
+========================= */
+
+async function fetchHTML(url) {
+  const fetch = (await import('node-fetch')).default;
+
+  const response = await fetch(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
+      'Accept-Language': 'en-US,en;q=0.9,he;q=0.8',
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error('Fetch failed: ' + response.status);
+  }
+
+  return await response.text();
+}
+
+/* =========================
+   EXTRACT PRICE
+========================= */
+
+function extractPrice(html) {
+  // JSON-LD price
+  const jsonPrice = html.match(/"price"\s*:\s*"?([\d.]+)"?/i);
+  if (jsonPrice) return parseFloat(jsonPrice[1]);
+
+  // meta price
+  const metaPrice = html.match(/product:price:amount.*?content="([\d.,]+)"/i);
+  if (metaPrice) return parseFloat(metaPrice[1].replace(',', ''));
+
+  // ₪ price
+  const ils = html.match(/₪\s?([\d,]+(\.\d{1,2})?)/);
+  if (ils) return parseFloat(ils[1].replace(',', ''));
+
+  return null;
+}
+
+/* =========================
+   EXTRACT NAME
+========================= */
+
+function extractName(html) {
+  const og = html.match(/<meta property="og:title" content="([^"]+)"/i);
+  if (og) return og[1];
+
+  const title = html.match(/<title>([^<]+)<\/title>/i);
+  if (title) return title[1];
+
+  return null;
+}
+
+/* =========================
+   DETECT ENDPOINT
+========================= */
+
+app.post('/detect', async (req, res) => {
+  try {
+    let { url } = req.body;
+
+    if (!url) {
+      return res.json({ error: 'Missing url' });
+    }
+
+    if (!url.startsWith('http')) {
+      url = 'https://' + url;
+    }
+
+    const store = detectStore(url);
+
+    const html = await fetchHTML(url);
+
+    const price = extractPrice(html);
+    const name = extractName(html);
+
+    res.json({
+      name,
+      price,
+      store
+    });
+
+  } catch (err) {
+    res.json({
+      error: err.message
+    });
+  }
+});
+
+/* =========================
+   ADD PRODUCT
+========================= */
+
+app.post('/products', async (req, res) => {
   const { url, name, price } = req.body;
 
   const product = {
     id: Date.now(),
     url,
-    name: name || 'Unknown product',
-    price: price || null,
+    name,
+    price,
+    store: detectStore(url),
     createdAt: new Date()
   };
 
@@ -45,94 +154,7 @@ app.post('/products', (req, res) => {
 });
 
 /* =========================
-   PLAYWRIGHT DETECT
-========================= */
-
-app.post('/detect', async (req, res) => {
-  const { url } = req.body;
-
-  if (!url) {
-    return res.json({ error: 'Missing url' });
-  }
-
-  let browser;
-
-  try {
-    browser = await chromium.launch({
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-      headless: true
-    });
-
-    const page = await browser.newPage();
-
-    await page.goto(url, {
-      waitUntil: 'domcontentloaded',
-      timeout: 25000
-    });
-
-    // ===== NAME =====
-    let name = null;
-
-    try {
-      name = await page.locator('h1').first().textContent();
-    } catch {}
-
-    if (!name) {
-      try {
-        name = await page.title();
-      } catch {}
-    }
-
-    if (name) {
-      name = name.trim();
-    }
-
-    // ===== PRICE =====
-    let price = null;
-
-    const selectors = [
-      '[class*="price"]',
-      '[data-testid*="price"]',
-      '[class*="Price"]',
-      'span'
-    ];
-
-    for (const sel of selectors) {
-      try {
-        const text = await page.locator(sel).first().textContent();
-
-        if (text && text.match(/[0-9]/)) {
-          const clean = text.replace(/[^\d.]/g, '');
-          if (clean) {
-            price = Number(clean);
-            break;
-          }
-        }
-      } catch {}
-    }
-
-    await browser.close();
-
-    res.json({
-      name: name || null,
-      price: price || null
-    });
-
-  } catch (err) {
-    console.error(err);
-
-    if (browser) await browser.close();
-
-    res.json({
-      error: 'Playwright failed',
-      name: null,
-      price: null
-    });
-  }
-});
-
-/* =========================
-   START SERVER
+   SERVER
 ========================= */
 
 app.listen(PORT, () => {
