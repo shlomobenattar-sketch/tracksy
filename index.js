@@ -8,9 +8,8 @@ app.use(cors());
 app.use(express.json());
 
 /* ========================
-   STORAGE (temporary)
+   TEMP STORAGE (MVP)
 ======================== */
-
 let products = [];
 
 /* ========================
@@ -46,7 +45,7 @@ function detectStore(url) {
 }
 
 /* ========================
-   DETECT (existing)
+   DETECT ROUTE
 ======================== */
 
 app.post('/detect', async (req, res) => {
@@ -62,18 +61,22 @@ app.post('/detect', async (req, res) => {
 
     const response = await fetch(fullUrl, {
       headers: {
-        'User-Agent': 'Mozilla/5.0',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
         'Accept': 'text/html',
-      }
+        'Accept-Language': 'en-US,en;q=0.9'
+      },
+      redirect: 'follow'
     });
 
-    if (!response.ok) throw new Error('Fetch failed: ' + response.status);
+    if (!response.ok) {
+      throw new Error('Fetch failed: ' + response.status);
+    }
 
     const html = await response.text();
 
     let name = '';
     const titleMatch = html.match(/<title>(.*?)<\/title>/i);
-    if (titleMatch) name = titleMatch[1];
+    if (titleMatch) name = titleMatch[1].trim();
 
     res.json({
       name,
@@ -92,23 +95,57 @@ app.post('/detect', async (req, res) => {
 });
 
 /* ========================
-   ADD PRODUCT
+   ADD PRODUCT (AUTO)
 ======================== */
 
-app.post('/products', (req, res) => {
-  const { url, name, price } = req.body;
+app.post('/products', async (req, res) => {
+  const { url } = req.body;
 
   if (!url) {
     return res.json({ error: 'Missing url' });
   }
 
-  const store = detectStore(url);
+  const fullUrl = url.startsWith('http') ? url : 'https://' + url;
+  const store = detectStore(fullUrl);
+
+  let name = 'Unknown product';
+  let price = null;
+
+  try {
+    const fetch = (await import('node-fetch')).default;
+
+    const response = await fetch(fullUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0',
+        'Accept': 'text/html'
+      }
+    });
+
+    if (response.ok) {
+      const html = await response.text();
+
+      // extract name
+      const titleMatch = html.match(/<title>(.*?)<\/title>/i);
+      if (titleMatch) {
+        name = titleMatch[1].trim();
+      }
+
+      // basic price detection
+      const priceMatch = html.match(/[\$₪€£]\s*(\d+[.,]?\d*)/);
+      if (priceMatch) {
+        price = parseFloat(priceMatch[1].replace(',', '.'));
+      }
+    }
+
+  } catch (e) {
+    console.log('Auto fetch failed:', e.message);
+  }
 
   const newProduct = {
     id: Date.now(),
-    url,
-    name: name || 'Unknown product',
-    price: price || null,
+    url: fullUrl,
+    name,
+    price,
     store,
     createdAt: new Date()
   };
@@ -116,7 +153,7 @@ app.post('/products', (req, res) => {
   products.push(newProduct);
 
   res.json({
-    message: 'Product added',
+    message: 'Product added automatically',
     product: newProduct
   });
 });
